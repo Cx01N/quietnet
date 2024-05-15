@@ -8,8 +8,16 @@ except NameError: pass
 
 # split something into chunks
 def chunks(l, n):
-    for i in xrange(0, len(l), n):
-        yield l[i:i+n]
+    """ Yield successive n-sized chunks from l. """
+    for i in range(0, len(l), n):  # Changed xrange to range
+        yield l[i:i + n]
+
+def unpack(buffer):
+    return unpack_buffer(list(chunks(buffer, 2)))
+
+def unpack_buffer(buffer):
+    return [x[0] + (x[1] << 8) for x in buffer]
+
 
 def unpack(buffer):
     return unpack_buffer(list(chunks(buffer, 2)))

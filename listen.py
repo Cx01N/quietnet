@@ -1,4 +1,4 @@
-import Queue
+import queue
 import threading
 import time
 import pyaudio
@@ -17,18 +17,15 @@ sigil = [int(x) for x in options.sigil]
 frames_per_buffer = chunk * 10
 
 in_length = 4000
-# raw audio frames
-in_frames = Queue.Queue(in_length)
-# the value of the fft at the frequency we care about
-points = Queue.Queue(in_length)
-bits = Queue.Queue(in_length / frame_length)
+in_frames = queue.Queue(in_length)
+points = queue.Queue(in_length)
+bits = queue.Queue(in_length // frame_length)
 
 wait_for_sample_timeout = 0.1
 wait_for_frames_timeout = 0.1
 wait_for_point_timeout = 0.1
 wait_for_byte_timeout = 0.1
 
-# yeeeep this is just hard coded
 bottom_threshold = 8000
 
 def process_frames():
@@ -38,7 +35,7 @@ def process_frames():
             fft = quietnet.fft(frame)
             point = quietnet.has_freq(fft, search_freq, rate, chunk)
             points.put(point)
-        except Queue.Empty:
+        except queue.Empty:
             time.sleep(wait_for_frames_timeout)
 
 def process_points():
@@ -47,7 +44,7 @@ def process_points():
         while len(cur_points) < frame_length:
             try:
                 cur_points.append(points.get(False))
-            except Queue.Empty:
+            except queue.Empty:
                 time.sleep(wait_for_point_timeout)
 
         while True:
@@ -55,13 +52,13 @@ def process_points():
                 try:
                     cur_points.append(points.get(False))
                     cur_points = cur_points[1:]
-                except Queue.Empty:
+                except queue.Empty:
                     time.sleep(wait_for_point_timeout)
             next_point = None
-            while next_point == None:
+            while next_point is None:
                 try:
                     next_point = points.get(False)
-                except Queue.Empty:
+                except queue.Empty:
                     time.sleep(wait_for_point_timeout)
             if next_point > bottom_threshold:
                 bits.put(0)
@@ -77,52 +74,62 @@ def process_points():
                 cur_points = []
                 bits.put(bit)
                 last_bits.append(bit)
-            # if we've only seen low bits for a while assume the next message might not be on the same bit boundary
             if len(last_bits) > 3:
                 if sum(last_bits) == 0:
                     break
-                last_bits = last_bits[1:]
-            try:
-                cur_points.append(points.get(False))
-            except Queue.Empty:
-                time.sleep(wait_for_point_timeout)
-
-def process_bits():
-    while True:
-        cur_bits = []
-        # while the last two characters are not the sigil
-        while len(cur_bits) < 2 or cur_bits[-len(sigil):len(cur_bits)] != sigil:
-            try:
-                cur_bits.append(bits.get(False))
-            except Queue.Empty:
-                time.sleep(wait_for_byte_timeout)
-        sys.stdout.write(psk.decode(cur_bits[:-len(sigil)]))
-        sys.stdout.flush()
-
-# start the queue processing threads
-processes = [process_frames, process_points, process_bits]
-threads = []
-
-for process in processes:
-    thread = threading.Thread(target=process)
-    thread.daemon = True
-    thread.start()
+                else:
+                    last_bits = last_bits[1:]
+            while len(cur_points) < frame_length:
+                try:
+                    cur_points.append(points.get(False))
+                except queue.Empty:
+                    time.sleep(wait_for_point_timeout)
 
 def callback(in_data, frame_count, time_info, status):
     frames = list(quietnet.chunks(quietnet.unpack(in_data), chunk))
     for frame in frames:
-        if not in_frames.full():
-            in_frames.put(frame, False)
-    return (in_data, pyaudio.paContinue)
+        in_frames.put(frame)
+    return (None, pyaudio.paContinue)
 
 def start_analysing_stream():
-    p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT, channels=options.channels, rate=options.rate,
-        input=True, frames_per_buffer=frames_per_buffer, stream_callback=callback)
-    stream.start_stream()
-    while stream.is_active():
-        time.sleep(wait_for_sample_timeout)
+    threads = [
+        threading.Thread(target=process_frames),
+        threading.Thread(target=process_points)
+    ]
 
-sys.stdout.write("Quietnet listening at %sHz" % search_freq)
-sys.stdout.flush()
-start_analysing_stream()
+    for thread in threads:
+        thread.daemon = True
+        thread.start()
+
+    while True:
+        bit_sequence = []
+        while len(bit_sequence) < len(sigil):
+            try:
+                bit_sequence.append(bits.get(False))
+            except queue.Empty:
+                time.sleep(wait_for_sample_timeout)
+
+        if bit_sequence[-len(sigil):] == sigil:
+            message_bits = []
+            while True:
+                try:
+                    bit = bits.get(False)
+                    message_bits.append(bit)
+                    if message_bits[-len(sigil):] == sigil:
+                        break
+                except queue.Empty:
+                    time.sleep(wait_for_sample_timeout)
+
+            # Print the received bit sequence for debugging
+            print(f"Received bit sequence: {message_bits[:-len(sigil)]}")
+
+            try:
+                decoded_message = psk.decode(message_bits[:-len(sigil)])
+                print(f"Decoded message: {decoded_message}")
+            except ValueError as e:
+                print(f"Decoding error: {e}")
+
+if __name__ == "__main__":
+    p = pyaudio.PyAudio()
+    stream = p.open(format=FORMAT, channels=1, rate=rate, input=True, frames_per_buffer=frames_per_buffer, stream_callback=callback)
+    start_analysing_stream()
